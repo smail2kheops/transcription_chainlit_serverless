@@ -1,0 +1,26 @@
+:root {
+    color-scheme: light dark;
+}
+
+.watermark {
+    display: none !important;
+}
+
+.logo {
+    display: none !important;
+}
+
+.text-input {
+    @apply focus:outline:none;
+}
+
+*:disabled {
+    opacity: 1 !important;
+}
+[data-variant="sidebar"] {
+    display: none;
+}
+
+button[id^="starter"] {
+    color: red !important;
+}
