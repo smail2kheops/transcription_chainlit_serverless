@@ -4,15 +4,14 @@ import os
 import chainlit as cl
 import dotenv
 import logfire
-from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
-from chainlit.types import ThreadDict
 import storage
 from datalayer import DataLayer
 import request
-DataLayer()
+import db
 
-datalayer = SQLAlchemyDataLayer(conninfo=os.environ.get("DATABASE_URL"), ssl_require=True, show_logger=True,
-                                storage_provider=storage.storage)
+datalayer = DataLayer(conninfo=os.environ.get("DATABASE_URL"), ssl_require=True, show_logger=True,
+                      storage_provider=storage.storage)
+
 
 @cl.data_layer
 def get_data_layer():
@@ -51,12 +50,17 @@ async def set_starters():
 
 @cl.on_chat_start
 async def on_start():
-    cl.user_session.set('ElementSidebar', cl.ElementSidebar())
+    return
+    # element = cl.CustomElement(name='Loader')
+    # await cl.Message('', elements=[element]).send()
+    #
+    # cl.user_session.set('ElementSidebar', cl.ElementSidebar())
+
 
 async def affichage():
     elements = cl.user_session.get('customElement', None)
     elements.props = cl.user_session.get('props')
-    await DataLayer.update_element(elements, cl.user_session.get('id'))
+    await datalayer.update_element(elements, cl.user_session.get('id'))
     user_id = await get_data_layer()._get_user_id_by_thread(elements.thread_id)
     file_object_key = f"{user_id}/{elements.id}/Source"
     print(file_object_key)
@@ -65,12 +69,20 @@ async def affichage():
     # upload_source(file_object_key, json.dumps(elements.props))
     return
 
+
 @cl.on_message
 async def main(message):
     elements = message.elements
     content = message.content
     if content == '':
+        content = await datalayer.get_current_timestamp()
+        await cl.context.emitter.emit("first_interaction",
+                                {
+                                    "interaction": content,
+                                    "thread_id": cl.context.session.thread_id,
+                                })
         message.content = 'transcription'
+        await message.update()
 
     if len(elements) == 0 and content != '':
         return await cl.Message("Veuillez uploader un fichier audio").send()
@@ -83,24 +95,40 @@ async def main(message):
 
     if len(elements) == 1:
         print(elements[0].path)
-        task_id = request.transcribe(elements[0].path,)
-    await cl.Message(content, elements=elements).send()
-    print(cl.context.session.thread_id)
+        response = request.transcribe(elements[0].path, )
+        await datalayer.update_tasks(cl.context.session.thread_id, response['task_id'])
+        element = cl.CustomElement(name='Loader', props = {'name':'transcription',
+                                                           'status':'RUNNING',
+                                                           'filename':elements[0].name,})
+        await cl.Message('', elements=[element]).send()
 
-# @cl.on_chat_resume
-# async def on_chat_resume(thread: ThreadDict):
-#     mh = await DataLayer.get_messages(thread['id'])
-#     cl.user_session.set("message_history", mh)
-#     for step in thread['elements']:
-#         if step['type'] == 'custom':
-#             res = await DataLayer.get_element(step['threadId'], step['id'])
-#             print(step)
-#             step['props'] = res['props']
-#             if 'feedback' in res['props'].keys():
-#                 statistic = await DataLayer.count_response(step['props']['args'])
-#                 step['props']['source'] = 'cached'
-#                 step['props']['feedback'] = statistic
-#                 print(statistic)
-#
-#     json.dump(thread, open('output.json', 'w', encoding='utf-8'), indent=4)
-    # print(json.dumps(thread, indent=4))
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    # mh = await datalayer.get_messages(thread['id'])
+    # cl.user_session.set("message_history", mh)
+    for step in thread['elements']:
+        if step['type'] == 'custom':
+            element = await datalayer.get_element(step['threadId'], step['id'])
+            if element['props'].get('name') == 'transcription':
+                taks_id = await datalayer.get_task(step['threadId'])
+                res = await request.check(taks_id)
+                step['props']['status'] = res['status']
+                step['props']['task_id'] = taks_id
+                step['props']['filename'] = element['props']['filename']
+                cl.user_session.set('last_conv',{'id':taks_id,
+                                                 'status':res['status'],
+                                                 'step_id':step['id'],
+                                                 'name':element['props']['filename'],})
+
+    last_conv = cl.user_session.get('last_conv', None)
+    if last_conv is not None:
+        print(last_conv)
+        if last_conv['status'] == 'COMPLETE':
+            transcription = db.get(last_conv['id'])
+            print(transcription)
+        elif thread['elements'][-1]['id'] != last_conv['step_id']:
+            element = cl.CustomElement(name='Loader', props={'name': 'transcription',
+                                                             'status': 'RUNNING',
+                                                             'filename':last_conv['name']})
+            await cl.Message('', elements=[element]).send()
+

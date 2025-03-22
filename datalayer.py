@@ -1,149 +1,18 @@
-from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
-from chainlit.data.storage_clients.s3 import S3StorageClient
-import os
 import json
-from datetime import datetime
-from chainlit.element import ElementDict
-import chainlit
-from chainlit.types import Feedback
-
-from models import Messages
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
-import logfire
+from chainlit.element import ElementDict
+from models import Messages
+from typing import Optional, Dict, List
 from chainlit.logger import logger
+import chainlit as cl
 
 
-class DataLayer:
-    datalayer = None
-
-    def __init__(self):
-        conninfo = os.environ.get("DATABASE_URL")
-
-        kwargs = {
-            'aws_access_key_id': os.environ['APP_AWS_ACCESS_KEY'],
-            'aws_secret_access_key': os.environ['APP_AWS_SECRET_KEY']
-        }
-
-        storage = S3StorageClient('52713ed5-d0d2-4eaf-8701-dcb26067a9f3', **kwargs)
-
-        DataLayer.datalayer = SQLAlchemyDataLayer(conninfo=conninfo, ssl_require=True, show_logger=False,
-                                                  storage_provider=storage)
-
-    @staticmethod
-    def get_data_layer():
-        return DataLayer.datalayer
-
-    @staticmethod
-    async def create_cache(thread_id: str, step_id: str, args: dict, response: dict):
-        columns = ['type', 'document', 'direction', 'objet', 'montant', 'montant_sup', 'comp']
-        inputs = {p: args[p] for p in columns}
-        inputs['forId'] = step_id
-        inputs['threadId'] = thread_id
-        inputs['response'] = json.dumps(response)
-        inputs['direction'] = inputs['direction'][0] if isinstance(inputs['direction'], list) else inputs['direction']
-        inputs['created_date'] = datetime.now()
-
-        columns = ", ".join(f'"{key}"' for key in inputs.keys() if inputs[key] is not None)
-        values = ", ".join(f":{key}" for key in inputs.keys() if inputs[key] is not None)
-        query = f"""
-                INSERT INTO cache_qui_signe ({columns},"feedback")
-                VALUES ({values},1)
-            """
-
-        await DataLayer.get_data_layer().execute_sql(query=query, parameters=inputs)
-
-    @staticmethod
-    async def get_direction(args: dict):
-        # query = """SELECT * FROM cache_qui_signe WHERE "document" = :document AND "objet" = :objet AND created_date >= NOW() - INTERVAL '30' DAY"""
-        # parameters = {"document": args['document'], "objet": args['objet']}
-        query = """SELECT * FROM cache_qui_signe WHERE "objet" = :objet AND (created_date >= NOW() - INTERVAL '30' DAY OR feedback=2)"""
-        parameters = {"objet": args['objet']}
-        element = await DataLayer.get_data_layer().execute_sql(
-            query=query, parameters=parameters
-        )
-        try:
-            if isinstance(element, list) and element:
-                return element[0]
-        except:
-            return None
-
-    @staticmethod
-    async def get_explication(args: dict):
-        # query = """SELECT * FROM cache_qui_signe WHERE "document" = :document AND "objet" = :objet AND created_date >= NOW() - INTERVAL '30' DAY"""
-        # parameters = {"document": args['document'], "objet": args['objet']}
-        query = """SELECT * FROM cache_qui_signe WHERE "direction" = :direction AND (created_date >= NOW() - INTERVAL '30' DAY OR feedback=2)"""
-        parameters = {"direction": args['direction']}
-        element = await DataLayer.get_data_layer().execute_sql(
-            query=query, parameters=parameters
-        )
-        try:
-            if isinstance(element, list) and element:
-                return element[0]
-        except:
-            return None
-
-    @staticmethod
-    async def get_response(args: dict):
-        columns = ['document', 'direction', 'objet', 'montant', 'montant_sup', 'comp']
-        values = " AND ".join(f'"{key}" = :{key}' for key in columns)
-        query = f"""SELECT * FROM cache_qui_signe WHERE {values} AND created_date >= NOW() - INTERVAL '30' DAY"""
-        parameters = {k: args[k] for k in columns}
-        direction = parameters['direction']
-        parameters['direction'] = direction[0] if isinstance(direction, list) else direction
-        element = await DataLayer.get_data_layer().execute_sql(
-            query=query, parameters=parameters
-        )
-        try:
-            if isinstance(element, list) and element:
-                return element[0]['response']
-        except Exception as e:
-            return None
-
-    @staticmethod
-    async def count_response(args: dict):
-        columns = ['document', 'direction', 'objet', 'montant', 'montant_sup', 'comp']
-        values = " AND ".join(f'"{key}" = :{key}' for key in columns)
-
-        query = f"""
-            SELECT f."value", count(*) FROM cache_qui_signe c
-    --         LEFT JOIN elements e on  e."id" = c."forId"
-            LEFT JOIN steps s ON s."parentId" = c."forId"
-            LEFT JOIN feedbacks f ON s."parentId" = f."forId"
-            WHERE {values} AND created_date >= NOW() - INTERVAL '30' DAY
-            GROUP BY f."value"
-            """
-        statistic = await DataLayer.datalayer.execute_sql(
-            query=query, parameters=args
-        )
-        print(statistic)
-
-        try:
-            if isinstance(statistic, list) and statistic:
-                feedback = {'1': 0, '2': 0, '0': 0}
-                if statistic is not None:
-                    for stat in statistic:
-                        if stat['value'] == 0:
-                            feedback['0'] = stat['count']
-                        elif stat['value'] == 1:
-                            feedback['1'] = stat['count']
-                        else:
-                            feedback['2'] += stat['count']
-                return feedback
-        except Exception as e:
-            return None
-
-    @staticmethod
-    async def delete_response(thread_id: str, step_id: str) -> bool:
-        query = """DELETE FROM cache_qui_signe WHERE "threadId" = :threadId AND "stepId" = :stepId"""
-        parameters = {"threadId": thread_id, "stepId": step_id}
-        await DataLayer.get_data_layer().execute_sql(query=query, parameters=parameters)
-        return True
-
-    @staticmethod
-    async def update_element(element, user_id):
+class DataLayer(SQLAlchemyDataLayer):
+    async def update_element(self, element, user_id):
         import aiofiles
         import aiohttp
-
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_element, user_id={user_id}, element={element.to_dict()}")
         if element.path:
             async with aiofiles.open(element.path, "rb") as f:
                 content = await f.read()
@@ -178,15 +47,15 @@ class DataLayer:
             f'"{column}"=:{value}' for column, value in zip(element_dict_cleaned.keys(), element_dict_cleaned.keys()))
 
         query = f'UPDATE elements SET {placeholders} WHERE "id"=$1 AND "threadId"=$2'
-        await DataLayer.get_data_layer().execute_sql(query=query, parameters=element_dict_cleaned)
+        await self.execute_sql(query=query, parameters=element_dict_cleaned)
 
-    @staticmethod
-    async def get_element(thread_id: str, element_id: str
-                          ):
+    async def get_element(self, thread_id: str, element_id: str):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_element, thread_id={thread_id}, element_id={element_id}")
 
         query = """SELECT * FROM elements WHERE "threadId" = :thread_id AND "id" = :element_id"""
         parameters = {"thread_id": thread_id, "element_id": element_id}
-        element = await DataLayer.get_data_layer().execute_sql(
+        element = await self.execute_sql(
             query=query, parameters=parameters
         )
         if isinstance(element, list) and element:
@@ -213,24 +82,26 @@ class DataLayer:
         else:
             return None
 
-    @staticmethod
-    async def update_messages(thread_id, msgs: Messages):
-        # msgs = Messages(messages=messages)
+    async def update_messages(self, thread_id, msgs: Messages):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_element, thread_id={thread_id}, messages={msgs.model_dump_json()}")
+
         parameters = {"thread_id": thread_id, "messages": msgs.model_dump_json()}
         resp = await DataLayer.get_messages(thread_id)
         if resp is None:
             query = """INSERT INTO messages ("threadId", "messages") VALUES (:thread_id, :messages)"""
-            await DataLayer.get_data_layer().execute_sql(query=query, parameters=parameters)
+            await self.execute_sql(query=query, parameters=parameters)
         else:
             query = '''UPDATE messages SET messages= :messages  WHERE "threadId"= :thread_id '''
-            await DataLayer.get_data_layer().execute_sql(query=query, parameters=parameters)
+            await self.execute_sql(query=query, parameters=parameters)
 
-    @staticmethod
-    async def get_messages(thread_id: str):
+    async def get_messages(self, thread_id: str):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_element, thread_id={thread_id}")
 
         query = """SELECT * FROM messages WHERE "threadId" = :thread_id"""
         parameters = {"thread_id": thread_id}
-        element = await DataLayer.get_data_layer().execute_sql(
+        element = await self.execute_sql(
             query=query, parameters=parameters
         )
         if isinstance(element, list) and element:
@@ -242,3 +113,109 @@ class DataLayer:
         else:
             return None
 
+    async def update_tasks(self, thread_id: str, task_id: str):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_element, thread_id={thread_id}, task_id={task_id}")
+
+        parameters = {
+            "thread_id": thread_id,
+            "task_id": task_id,
+        }  # Remove keys with None values
+        columns = ", ".join(f'"{key}"' for key in parameters.keys())
+        values = ", ".join(f":{key}" for key in parameters.keys())
+        updates = ", ".join(
+            f'"{key}" = EXCLUDED."{key}"' for key in parameters.keys() if key not in ["thread_id"]
+        )
+        query = f"""
+            INSERT INTO threads_tasks ({columns})
+            VALUES ({values})
+            ON CONFLICT ("thread_id") DO UPDATE
+            SET {updates};
+        """
+        await self.execute_sql(query=query, parameters=parameters)
+
+    async def get_task(self, thread_id: str):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: get_task, thread_id={thread_id}")
+
+        query = """SELECT * FROM threads_tasks WHERE "thread_id" = :thread_id"""
+        parameters = {"thread_id": thread_id}
+        element = await self.execute_sql(
+            query=query, parameters=parameters
+        )
+        if isinstance(element, list) and element:
+            element_dict = element[0]
+            return element_dict['task_id']
+        else:
+            return None
+
+    async def update_thread(
+            self,
+            thread_id: str,
+            name: Optional[str] = None,
+            user_id: Optional[str] = None,
+            metadata: Optional[Dict] = None,
+            tags: Optional[List[str]] = None,
+    ):
+
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_thread, thread_id={thread_id}, name={name}")
+
+        user_identifier = None
+        if user_id:
+            user_identifier = await self._get_user_identifer_by_id(user_id)
+
+        data = {
+            "id": thread_id,
+            "createdAt": (
+                await self.get_current_timestamp() if metadata is None else None
+            ),
+            "name": (
+                name
+                if name is not None and len(name) > 0
+                else f"Session {await self.get_current_timestamp()}"
+            ),
+            "userId": user_id,
+            "userIdentifier": user_identifier,
+            "tags": tags,
+            "metadata": json.dumps(metadata) if metadata else None,
+        }
+        parameters = {
+            key: value for key, value in data.items() if value is not None
+        }  # Remove keys with None values
+        columns = ", ".join(f'"{key}"' for key in parameters.keys())
+        values = ", ".join(f":{key}" for key in parameters.keys())
+        updates = ", ".join(
+            f'"{key}" = EXCLUDED."{key}"' for key in parameters.keys() if key != "id"
+        )
+        query = f"""
+            INSERT INTO threads ({columns})
+            VALUES ({values})
+            ON CONFLICT ("id") DO UPDATE
+            SET {updates};
+        """
+        await self.execute_sql(query=query, parameters=parameters)
+
+    async def update_thread_name(
+            self,
+            thread_id: str,
+            name: str = None,
+    ):
+        if self.show_logger:
+            logger.info(f"SQLAlchemy: update_thread_name, thread_id={thread_id}, name={name}")
+
+        data = {
+            "id": thread_id,
+            "name": (
+                name
+                if name is not None
+                else f"Session {await self.get_current_timestamp()}"
+            ),
+        }
+        parameters = {
+            key: value for key, value in data.items() if value is not None
+        }
+        query = f"""
+            UPDATE threads SET name=:name WHERE id=:id;
+        """
+        await self.execute_sql(query=query, parameters=parameters)

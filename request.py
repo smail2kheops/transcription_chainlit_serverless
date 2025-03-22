@@ -31,7 +31,7 @@ def transcribe(file_path, wd=True):
         return {'segments': [],
                 'status':'error'}
 
-def check(task_id):
+async def check(task_id):
     url = f"https://api.beam.cloud/v2/task/{task_id}"
     headers = {
         "Authorization": f"Bearer {AUTH_TOKEN}",
@@ -44,4 +44,5 @@ def check(task_id):
         result = response.json()
         return result
     except requests.exceptions.RequestException as e:
+        print(e)
         return {}
